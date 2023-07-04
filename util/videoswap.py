@@ -7,116 +7,99 @@ LastEditTime: 2021-11-24 19:19:52
 Description: 
 '''
 import os 
-import cv2
+import time
 import glob
-import torch
 import shutil
 import numpy as np
 from tqdm import tqdm
+
+import imageio_ffmpeg
+import torch
+from moviepy.editor import VideoFileClip 
+
 from util.reverse2original import reverse2wholeimage
-import moviepy.editor as mp
-from moviepy.editor import AudioFileClip, VideoFileClip 
-from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
-import  time
 from util.add_watermark import watermark_image
 from util.norm import SpecificNorm
 from parsing_model.model import BiSeNet
 
-def _totensor(array):
-    tensor = torch.from_numpy(array)
-    img = tensor.transpose(0, 1).transpose(0, 2).contiguous()
-    return img.float().div(255)
+def img_to_tensor(img_array):
+    img_array = img_array.transpose(-1, -3, -2) # HWC => CHW
+    img_array = img_array.astype(np.float32) * (1 / 255) # [0,255] => [0,1]
+    img_tensor = torch.from_numpy(img_array)
+    return img_tensor
 
-def video_swap(video_path, id_vetor, swap_model, detect_model, save_path, temp_results_dir='./temp_results', crop_size=224, no_simswaplogo = False,use_mask =False):
-    video_forcheck = VideoFileClip(video_path)
-    if video_forcheck.audio is None:
-        no_audio = True
-    else:
-        no_audio = False
+def video_swap(video_path, id_vector, swap_model, detect_model, save_path,
+    temp_results_dir='./temp_results', crop_size=224, no_simswaplogo=False, use_mask=False):
+    # audio checker
+    # video_forcheck = VideoFileClip(video_path)
+    # no_audio = video_forcheck.audio is None
+    # del video_forcheck
 
-    del video_forcheck
+    logoclass = None if no_simswaplogo else watermark_image('./simswaplogo/simswaplogo.png')
 
-    if not no_audio:
-        video_audio_clip = AudioFileClip(video_path)
+    spNorm = SpecificNorm()
 
-    video = cv2.VideoCapture(video_path)
-    logoclass = watermark_image('./simswaplogo/simswaplogo.png')
-    ret = True
-    frame_index = 0
-
-    frame_count = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    # video_WIDTH = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
-
-    # video_HEIGHT = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-    fps = video.get(cv2.CAP_PROP_FPS)
-    if  os.path.exists(temp_results_dir):
-            shutil.rmtree(temp_results_dir)
-
-    spNorm =SpecificNorm()
     if use_mask:
         n_classes = 19
         net = BiSeNet(n_classes=n_classes)
         net.cuda()
-        save_pth = os.path.join('./parsing_model/checkpoint', '79999_iter.pth')
-        net.load_state_dict(torch.load(save_pth))
+        ckpt_path = os.path.join('./parsing_model/checkpoint', '79999_iter.pth')
+        net.load_state_dict(torch.load(ckpt_path))
         net.eval()
     else:
-        net =None
+        net = None
 
-    # while ret:
-    for frame_index in tqdm(range(frame_count)): 
-        ret, frame = video.read()
-        if  ret:
-            detect_results = detect_model.get(frame,crop_size)
+    # initialize input video reader
+    src_reader = imageio_ffmpeg.read_frames(video_path, pix_fmt='rgb24')
+    src_meta = next(src_reader)
+    src_fps = src_meta['fps']
+    src_size = src_meta['size']
+    src_width, src_height = src_size
+    est_frames = src_meta['duration'] * src_fps
+    print(f'Metadata:\n{src_meta}')
+    print(f'Estimated number of frames: {est_frames}')
 
+    # initialize output video writer
+    dst_writer = imageio_ffmpeg.write_frames(save_path, src_size, pix_fmt_in='rgb24',
+        fps=src_fps, quality=6, macro_block_size=1, audio_path=video_path)
+    dst_writer.send(None)
+
+    # try-finally to handle release of the video reader and video writer
+    try:
+        # loop over the frames
+        for src_frame in tqdm(src_reader):
+            # convert RGB24 data from bytes to image array
+            src_frame = np.frombuffer(src_frame, dtype=np.uint8)
+            src_frame = src_frame.reshape(src_height, src_width, 3)
+
+            # face detection
+            detect_results = detect_model.get(src_frame, crop_size)
+
+            # face swap
             if detect_results is not None:
-                # print(frame_index)
-                if not os.path.exists(temp_results_dir):
-                        os.mkdir(temp_results_dir)
                 frame_align_crop_list = detect_results[0]
                 frame_mat_list = detect_results[1]
                 swap_result_list = []
-                frame_align_crop_tenor_list = []
+                frame_align_crop_tensor_list = []
                 for frame_align_crop in frame_align_crop_list:
-
-                    # BGR TO RGB
-                    # frame_align_crop_RGB = frame_align_crop[...,::-1]
-
-                    frame_align_crop_tenor = _totensor(cv2.cvtColor(frame_align_crop,cv2.COLOR_BGR2RGB))[None,...].cuda()
-
-                    swap_result = swap_model(None, frame_align_crop_tenor, id_vetor, None, True)[0]
-                    cv2.imwrite(os.path.join(temp_results_dir, 'frame_{:0>7d}.jpg'.format(frame_index)), frame)
+                    frame_align_crop_tensor = img_to_tensor(frame_align_crop)[None, ...].cuda()
+                    frame_align_crop_tensor_list.append(frame_align_crop_tensor)
+                    swap_result = swap_model(None, frame_align_crop_tensor, id_vector, None, True)[0]
                     swap_result_list.append(swap_result)
-                    frame_align_crop_tenor_list.append(frame_align_crop_tenor)
-
-                    
-
-                reverse2wholeimage(frame_align_crop_tenor_list,swap_result_list, frame_mat_list, crop_size, frame, logoclass,\
-                    os.path.join(temp_results_dir, 'frame_{:0>7d}.jpg'.format(frame_index)),no_simswaplogo,pasring_model =net,use_mask=use_mask, norm = spNorm)
-
+                frame_save_path = None
+                dst_frame = reverse2wholeimage(
+                    frame_align_crop_tensor_list, swap_result_list, frame_mat_list,
+                    crop_size, src_frame, frame_save_path,
+                    pasring_model=net, use_mask=use_mask, norm=spNorm
+                )
             else:
-                if not os.path.exists(temp_results_dir):
-                    os.mkdir(temp_results_dir)
-                frame = frame.astype(np.uint8)
-                if not no_simswaplogo:
-                    frame = logoclass.apply_frames(frame)
-                cv2.imwrite(os.path.join(temp_results_dir, 'frame_{:0>7d}.jpg'.format(frame_index)), frame)
-        else:
-            break
+                dst_frame = src_frame
 
-    video.release()
-
-    # image_filename_list = []
-    path = os.path.join(temp_results_dir,'*.jpg')
-    image_filenames = sorted(glob.glob(path))
-
-    clips = ImageSequenceClip(image_filenames,fps = fps)
-
-    if not no_audio:
-        clips = clips.set_audio(video_audio_clip)
-
-
-    clips.write_videofile(save_path,audio_codec='aac')
-
+            # write frame to output video
+            if not no_simswaplogo:
+                dst_frame = logoclass.apply_frames(dst_frame)
+            dst_writer.send(dst_frame)
+    finally:
+        # release
+        src_reader.close()
+        dst_writer.close()

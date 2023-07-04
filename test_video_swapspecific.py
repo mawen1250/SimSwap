@@ -93,6 +93,6 @@ if __name__ == '__main__':
         specific_person_downsample = F.interpolate(specific_person, size=(112,112))
         specific_person_id_nonorm = model.netArc(specific_person_downsample)
 
-        video_swap(opt.video_path, latend_id,specific_person_id_nonorm, opt.id_thres, \
-            model, app, opt.output_path,temp_results_dir=opt.temp_path,no_simswaplogo=opt.no_simswaplogo,use_mask=opt.use_mask,crop_size=crop_size)
-
+        video_swap(opt.video_path, latend_id,specific_person_id_nonorm, opt.id_thres,
+            model, app, opt.output_path, temp_results_dir=opt.temp_path,
+            no_simswaplogo=opt.no_simswaplogo, use_mask=opt.use_mask, crop_size=crop_size)

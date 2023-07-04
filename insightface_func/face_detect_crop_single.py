@@ -49,20 +49,17 @@ class Face_detect_crop:
 
 
     def prepare(self, ctx_id, det_thresh=0.5, det_size=(640, 640), mode ='None'):
-        self.det_thresh = det_thresh
         self.mode = mode
         assert det_size is not None
         print('set det-size:', det_size)
-        self.det_size = det_size
         for taskname, model in self.models.items():
             if taskname=='detection':
-                model.prepare(ctx_id, input_size=det_size)
+                model.prepare(ctx_id, input_size=det_size, det_thresh=det_thresh)
             else:
                 model.prepare(ctx_id)
 
     def get(self, img, crop_size, max_num=0):
         bboxes, kpss = self.det_model.detect(img,
-                                             threshold=self.det_thresh,
                                              max_num=max_num,
                                              metric='default')
         if bboxes.shape[0] == 0:
